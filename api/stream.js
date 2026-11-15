@@ -1,6 +1,6 @@
 export const config = {
   runtime: 'edge',
-  regions: ['sin1', 'iad1'],
+  regions: ['iad1', 'fra1'], // US & Frankfurt servers (best compatibility with OK.ru & Streamtape)
 };
 
 export default async function handler(req) {
@@ -8,17 +8,20 @@ export default async function handler(req) {
   const stId = searchParams.get('id');
   const okId = searchParams.get('ok');
 
-  const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
+  const desktopUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+  const mobileUA = 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
 
   try {
     let targetUrl = '';
     let referer = '';
     let cookieHeader = '';
 
+    // =========================================================================
     // 1. STREAMTAPE MODE (?id=VIDEO_ID)
+    // =========================================================================
     if (stId) {
       const embedRes = await fetch(`https://streamtape.com/e/${stId}`, {
-        headers: { 'User-Agent': ua },
+        headers: { 'User-Agent': desktopUA },
       });
       const html = await embedRes.text();
 
@@ -37,44 +40,50 @@ export default async function handler(req) {
       referer = `https://streamtape.com/e/${stId}`;
     }
 
-    // 2. OK.RU MODE (?ok=VIDEO_ID) - Same-IP Extraction + Cookie Forwarding
+    // =========================================================================
+    // 2. OK.RU MODE (?ok=VIDEO_ID) - Multi-Fallback Extractor
+    // =========================================================================
     else if (okId) {
-      const embedRes = await fetch(`https://ok.ru/videoembed/${okId}`, {
+      // Method A: Try Embed Endpoint
+      const embedRes = await fetch(`https://ok.ru/videoembed/${okId}?nochat=1`, {
         headers: {
-          'User-Agent': ua,
+          'User-Agent': desktopUA,
           'Referer': 'https://ok.ru/',
+          'Accept-Language': 'en-US,en;q=0.9',
         },
       });
 
       const setCookie = embedRes.headers.get('set-cookie');
-      if (setCookie) {
-        cookieHeader = setCookie;
-      }
-
+      if (setCookie) cookieHeader = setCookie;
       const html = await embedRes.text();
-      const optMatch = html.match(/data-options="([^"]+)"/i);
 
-      if (optMatch) {
-        const decoded = optMatch[1]
-          .replace(/&quot;/g, '"')
-          .replace(/&amp;/g, '&')
-          .replace(/&#039;/g, "'");
-        const data = JSON.parse(decoded);
+      targetUrl = parseOkruHtml(html);
 
-        if (data?.flashvars?.metadata) {
-          const meta = JSON.parse(data.flashvars.metadata);
-          if (Array.isArray(meta.videos) && meta.videos.length > 0) {
-            const rank = { full: 5, hd: 4, sd: 3, low: 2, lowest: 1, mobile: 0 };
-            meta.videos.sort((a, b) => (rank[b.name] || 0) - (rank[a.name] || 0));
-            targetUrl = meta.videos[0].url;
-          } else if (meta.hlsMasterPlaylistUrl) {
-            targetUrl = meta.hlsMasterPlaylistUrl;
+      // Method B: Fallback to Mobile Site (m.ok.ru) if embed is restricted
+      if (!targetUrl) {
+        const mobRes = await fetch(`https://m.ok.ru/video/${okId}`, {
+          headers: {
+            'User-Agent': mobileUA,
+            'Accept-Language': 'en-US,en;q=0.9',
+          },
+        });
+        const mobCookie = mobRes.headers.get('set-cookie');
+        if (mobCookie) cookieHeader = mobCookie;
+        const mobHtml = await mobRes.text();
+
+        targetUrl = parseOkruHtml(mobHtml);
+
+        // Method C: Direct CDN MP4 regex fallback from mobile HTML
+        if (!targetUrl) {
+          const cdnMatch = mobHtml.match(/https?:\/\/[^"'\\]+\.(?:mycdn\.me|okcdn\.ru)\/[^"'\\]+/i);
+          if (cdnMatch) {
+            targetUrl = cdnMatch[0].replace(/\\u0026/g, '&').replace(/\\\//g, '/');
           }
         }
       }
 
       if (!targetUrl) {
-        return new Response('OK.ru video is private or blocked', { status: 404 });
+        return new Response('OK.ru video is genuinely private, age-restricted (login required), or deleted by uploader.', { status: 404 });
       }
       referer = 'https://ok.ru/';
     } else {
@@ -83,7 +92,7 @@ export default async function handler(req) {
 
     // Stream video with Range & Cookie support
     const fetchHeaders = new Headers();
-    fetchHeaders.set('User-Agent', ua);
+    fetchHeaders.set('User-Agent', desktopUA);
     fetchHeaders.set('Referer', referer);
     if (cookieHeader) {
       fetchHeaders.set('Cookie', cookieHeader);
@@ -114,4 +123,33 @@ export default async function handler(req) {
   } catch (err) {
     return new Response('Proxy Error: ' + err.message, { status: 502 });
   }
+}
+
+function parseOkruHtml(html) {
+  const optMatch = html.match(/data-options="([^"]+)"/i);
+  if (!optMatch) return '';
+
+  try {
+    const decoded = optMatch[1]
+      .replace(/&quot;/g, '"')
+      .replace(/&amp;/g, '&')
+      .replace(/&#039;/g, "'");
+    const data = JSON.parse(decoded);
+
+    if (data?.flashvars?.metadata) {
+      const meta = typeof data.flashvars.metadata === 'string'
+        ? JSON.parse(data.flashvars.metadata)
+        : data.flashvars.metadata;
+
+      if (Array.isArray(meta.videos) && meta.videos.length > 0) {
+        const rank = { full: 5, hd: 4, sd: 3, low: 2, lowest: 1, mobile: 0 };
+        meta.videos.sort((a, b) => (rank[b.name] || 0) - (rank[a.name] || 0));
+        return meta.videos[0].url || '';
+      }
+      if (meta.hlsMasterPlaylistUrl) {
+        return meta.hlsMasterPlaylistUrl;
+      }
+    }
+  } catch (e) {}
+  return '';
 }
