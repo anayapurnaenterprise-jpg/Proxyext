@@ -17,10 +17,10 @@ export default async function handler(req) {
     let referer = '';
     let cookieHeader = '';
 
-    // 1. PIXELDRAIN MODE (?pd=FILE_ID) - Used by Web Version in India
+    // 1. PIXELDRAIN MODE (?pd=FILE_ID) - NO Referer header (prevents hotlink_detected)
     if (pdId) {
-      targetUrl = `https://pixeldrain.com/api/file/${pdId}`;
-      referer = 'https://pixeldrain.com/';
+      targetUrl = `https://pixeldrain.com/api/file/${pdId}?download`;
+      referer = '';
     }
     // 2. STREAMTAPE MODE (?id=VIDEO_ID)
     else if (stId) {
@@ -84,11 +84,17 @@ export default async function handler(req) {
 
     const fetchHeaders = new Headers();
     fetchHeaders.set('User-Agent', desktopUA);
-    fetchHeaders.set('Referer', referer);
-    if (cookieHeader) fetchHeaders.set('Cookie', cookieHeader);
+    if (referer) {
+      fetchHeaders.set('Referer', referer);
+    }
+    if (cookieHeader) {
+      fetchHeaders.set('Cookie', cookieHeader);
+    }
 
     const rangeHeader = req.headers.get('range');
-    if (rangeHeader) fetchHeaders.set('Range', rangeHeader);
+    if (rangeHeader) {
+      fetchHeaders.set('Range', rangeHeader);
+    }
 
     const upstream = await fetch(targetUrl, {
       headers: fetchHeaders,
