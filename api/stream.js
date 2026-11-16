@@ -1,12 +1,13 @@
 export const config = {
   runtime: 'edge',
-  regions: ['iad1', 'fra1'], // US & Frankfurt servers (best compatibility with OK.ru & Streamtape)
+  regions: ['iad1', 'fra1'],
 };
 
 export default async function handler(req) {
   const { searchParams } = new URL(req.url);
   const stId = searchParams.get('id');
   const okId = searchParams.get('ok');
+  const pdId = searchParams.get('pd');
 
   const desktopUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
   const mobileUA = 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
@@ -16,10 +17,13 @@ export default async function handler(req) {
     let referer = '';
     let cookieHeader = '';
 
-    // =========================================================================
-    // 1. STREAMTAPE MODE (?id=VIDEO_ID)
-    // =========================================================================
-    if (stId) {
+    // 1. PIXELDRAIN MODE (?pd=FILE_ID) - Used by Web Version in India
+    if (pdId) {
+      targetUrl = `https://pixeldrain.com/api/file/${pdId}`;
+      referer = 'https://pixeldrain.com/';
+    }
+    // 2. STREAMTAPE MODE (?id=VIDEO_ID)
+    else if (stId) {
       const embedRes = await fetch(`https://streamtape.com/e/${stId}`, {
         headers: { 'User-Agent': desktopUA },
       });
@@ -39,12 +43,8 @@ export default async function handler(req) {
       }
       referer = `https://streamtape.com/e/${stId}`;
     }
-
-    // =========================================================================
-    // 2. OK.RU MODE (?ok=VIDEO_ID) - Multi-Fallback Extractor
-    // =========================================================================
+    // 3. OK.RU MODE (?ok=VIDEO_ID)
     else if (okId) {
-      // Method A: Try Embed Endpoint
       const embedRes = await fetch(`https://ok.ru/videoembed/${okId}?nochat=1`, {
         headers: {
           'User-Agent': desktopUA,
@@ -52,28 +52,20 @@ export default async function handler(req) {
           'Accept-Language': 'en-US,en;q=0.9',
         },
       });
-
       const setCookie = embedRes.headers.get('set-cookie');
       if (setCookie) cookieHeader = setCookie;
       const html = await embedRes.text();
-
       targetUrl = parseOkruHtml(html);
 
-      // Method B: Fallback to Mobile Site (m.ok.ru) if embed is restricted
       if (!targetUrl) {
         const mobRes = await fetch(`https://m.ok.ru/video/${okId}`, {
-          headers: {
-            'User-Agent': mobileUA,
-            'Accept-Language': 'en-US,en;q=0.9',
-          },
+          headers: { 'User-Agent': mobileUA, 'Accept-Language': 'en-US,en;q=0.9' },
         });
         const mobCookie = mobRes.headers.get('set-cookie');
         if (mobCookie) cookieHeader = mobCookie;
         const mobHtml = await mobRes.text();
-
         targetUrl = parseOkruHtml(mobHtml);
 
-        // Method C: Direct CDN MP4 regex fallback from mobile HTML
         if (!targetUrl) {
           const cdnMatch = mobHtml.match(/https?:\/\/[^"'\\]+\.(?:mycdn\.me|okcdn\.ru)\/[^"'\\]+/i);
           if (cdnMatch) {
@@ -83,25 +75,20 @@ export default async function handler(req) {
       }
 
       if (!targetUrl) {
-        return new Response('OK.ru video is genuinely private, age-restricted (login required), or deleted by uploader.', { status: 404 });
+        return new Response('OK.ru video is private or blocked', { status: 404 });
       }
       referer = 'https://ok.ru/';
     } else {
-      return new Response('D Stream Proxy Active! Use ?id=STREAMTAPE_ID or ?ok=OKRU_ID', { status: 200 });
+      return new Response('D Stream Proxy Active! Use ?id=STREAMTAPE_ID, ?ok=OKRU_ID, or ?pd=PIXELDRAIN_ID', { status: 200 });
     }
 
-    // Stream video with Range & Cookie support
     const fetchHeaders = new Headers();
     fetchHeaders.set('User-Agent', desktopUA);
     fetchHeaders.set('Referer', referer);
-    if (cookieHeader) {
-      fetchHeaders.set('Cookie', cookieHeader);
-    }
+    if (cookieHeader) fetchHeaders.set('Cookie', cookieHeader);
 
     const rangeHeader = req.headers.get('range');
-    if (rangeHeader) {
-      fetchHeaders.set('Range', rangeHeader);
-    }
+    if (rangeHeader) fetchHeaders.set('Range', rangeHeader);
 
     const upstream = await fetch(targetUrl, {
       headers: fetchHeaders,
@@ -128,27 +115,17 @@ export default async function handler(req) {
 function parseOkruHtml(html) {
   const optMatch = html.match(/data-options="([^"]+)"/i);
   if (!optMatch) return '';
-
   try {
-    const decoded = optMatch[1]
-      .replace(/&quot;/g, '"')
-      .replace(/&amp;/g, '&')
-      .replace(/&#039;/g, "'");
+    const decoded = optMatch[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&#039;/g, "'");
     const data = JSON.parse(decoded);
-
     if (data?.flashvars?.metadata) {
-      const meta = typeof data.flashvars.metadata === 'string'
-        ? JSON.parse(data.flashvars.metadata)
-        : data.flashvars.metadata;
-
+      const meta = typeof data.flashvars.metadata === 'string' ? JSON.parse(data.flashvars.metadata) : data.flashvars.metadata;
       if (Array.isArray(meta.videos) && meta.videos.length > 0) {
         const rank = { full: 5, hd: 4, sd: 3, low: 2, lowest: 1, mobile: 0 };
         meta.videos.sort((a, b) => (rank[b.name] || 0) - (rank[a.name] || 0));
         return meta.videos[0].url || '';
       }
-      if (meta.hlsMasterPlaylistUrl) {
-        return meta.hlsMasterPlaylistUrl;
-      }
+      if (meta.hlsMasterPlaylistUrl) return meta.hlsMasterPlaylistUrl;
     }
   } catch (e) {}
   return '';
