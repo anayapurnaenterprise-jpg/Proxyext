@@ -11,15 +11,18 @@ export default async function handler(req) {
 
   const desktopUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
   const mobileUA = 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
+  const playerUA = 'Lavf/60.3.100'; // ExoPlayer / VLC Media Player User-Agent (Bypasses Pixeldrain Hotlink Check)
 
   try {
     let targetUrl = '';
     let referer = '';
     let cookieHeader = '';
+    let customUA = desktopUA;
 
-    // 1. PIXELDRAIN MODE (?pd=FILE_ID) - NO Referer header (prevents hotlink_detected)
+    // 1. PIXELDRAIN MODE (?pd=FILE_ID)
     if (pdId) {
-      targetUrl = `https://pixeldrain.com/api/file/${pdId}?download`;
+      targetUrl = `https://pixeldrain.com/api/file/${pdId}`;
+      customUA = playerUA;
       referer = '';
     }
     // 2. STREAMTAPE MODE (?id=VIDEO_ID)
@@ -83,18 +86,12 @@ export default async function handler(req) {
     }
 
     const fetchHeaders = new Headers();
-    fetchHeaders.set('User-Agent', desktopUA);
-    if (referer) {
-      fetchHeaders.set('Referer', referer);
-    }
-    if (cookieHeader) {
-      fetchHeaders.set('Cookie', cookieHeader);
-    }
+    fetchHeaders.set('User-Agent', customUA);
+    if (referer) fetchHeaders.set('Referer', referer);
+    if (cookieHeader) fetchHeaders.set('Cookie', cookieHeader);
 
     const rangeHeader = req.headers.get('range');
-    if (rangeHeader) {
-      fetchHeaders.set('Range', rangeHeader);
-    }
+    if (rangeHeader) fetchHeaders.set('Range', rangeHeader);
 
     const upstream = await fetch(targetUrl, {
       headers: fetchHeaders,
